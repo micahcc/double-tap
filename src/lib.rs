@@ -18,7 +18,7 @@ pub fn setup_graceful_shutdown() {
 pub fn trigger_shutdown() {}
 
 pub fn shutdown_triggered() -> bool {
-    return false;
+    return wait_for_shutdown_with_timeout(Duration::ZERO);
 }
 
 pub fn real_wait_for_signal(timeout: Duration) -> bool {
@@ -35,14 +35,18 @@ pub fn real_wait_for_signal(timeout: Duration) -> bool {
     let ret = unsafe { libc::sigtimedwait(&sigset, std::ptr::null_mut(), &wait_time) };
     if ret == -1 {
         // no signal
+        eprintln!("no signal");
         return false;
     }
-    // signal!
+
+    // signal! Unmask so that a second signal will kill the program
+    unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &mut sigset, std::ptr::null_mut()) };
+
     return true;
 }
 
 pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
-    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::AtomicBool;
     use std::sync::atomic::Ordering;
     use std::sync::Condvar;
     use std::sync::Mutex;
@@ -51,7 +55,7 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
     // thread into the waiting below, everyone else will wait for THAT waiter
     static REAL_WAITER_CV: Condvar = Condvar::new();
     static REAL_WAITER_MTX: Mutex<bool> = Mutex::new(false);
-    static TRIGGER_COUNT: AtomicU8 = AtomicU8::new(0);
+    static TRIGGERED: AtomicBool = AtomicBool::new(false);
 
     let now = Instant::now();
     let end_time = now + timeout;
@@ -62,7 +66,7 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
         {
             let mut waiter_active = REAL_WAITER_MTX.lock().expect("Locking");
             loop {
-                if TRIGGER_COUNT.load(Ordering::Relaxed) != 0 {
+                if TRIGGERED.load(Ordering::Relaxed) {
                     return true;
                 }
 
@@ -90,13 +94,13 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
         if real_wait_for_signal(remaining) {
             // triggered, increment
 
-            match TRIGGER_COUNT.fetch_add(1, Ordering::Relaxed) {
-                0 => {
+            match TRIGGERED.fetch_or(true, Ordering::Relaxed) {
+                false => {
                     // 0->1
                     return true;
                 }
-                _ => {
-                    // 1 -> something higher, double tap
+                true => {
+                    // double tapped
                     std::process::exit(libc::SIGTERM)
                 }
             }
