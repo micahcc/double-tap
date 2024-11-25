@@ -21,6 +21,18 @@ pub fn shutdown_triggered() -> bool {
     return wait_for_shutdown_with_timeout(Duration::ZERO);
 }
 
+fn unmask_signals_in_current_thread() {
+    let mut sigset =
+        unsafe { std::mem::transmute::<[u8; SIGSET_SIZE], libc::sigset_t>([0_u8; SIGSET_SIZE]) };
+    unsafe { libc::sigemptyset(&mut sigset) };
+    unsafe { libc::sigaddset(&mut sigset, libc::SIGINT) };
+    unsafe { libc::sigaddset(&mut sigset, libc::SIGTERM) };
+
+    // signal! Unmask so that a second signal will kill the program
+    eprintln!("unmasking");
+    unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &mut sigset, std::ptr::null_mut()) };
+}
+
 pub fn real_wait_for_signal(timeout: Duration) -> bool {
     let mut sigset =
         unsafe { std::mem::transmute::<[u8; SIGSET_SIZE], libc::sigset_t>([0_u8; SIGSET_SIZE]) };
@@ -38,10 +50,6 @@ pub fn real_wait_for_signal(timeout: Duration) -> bool {
         eprintln!("no signal");
         return false;
     }
-
-    // signal! Unmask so that a second signal will kill the program
-    unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &mut sigset, std::ptr::null_mut()) };
-
     return true;
 }
 
@@ -50,6 +58,11 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
     use std::sync::atomic::Ordering;
     use std::sync::Condvar;
     use std::sync::Mutex;
+
+    if TRIGGERED.load(Ordering::Relaxed) {
+        unmask_signals_in_current_thread();
+        return true;
+    }
 
     // Only 1 waiter of sigtimedwait will receive the event, so we'll force a single
     // thread into the waiting below, everyone else will wait for THAT waiter
@@ -67,6 +80,7 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
             let mut waiter_active = REAL_WAITER_MTX.lock().expect("Locking");
             loop {
                 if TRIGGERED.load(Ordering::Relaxed) {
+                    unmask_signals_in_current_thread();
                     return true;
                 }
 
@@ -86,6 +100,11 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
                     .wait_timeout(waiter_active, remaining)
                     .expect("lock");
                 waiter_active = result.0;
+                if result.1.timed_out() {
+                    eprintln!("timed out");
+                } else {
+                    eprintln!("notified");
+                }
             }
         }
 
@@ -93,21 +112,15 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
         let remaining = end_time - Instant::now();
         if real_wait_for_signal(remaining) {
             // triggered, increment
-
-            match TRIGGERED.fetch_or(true, Ordering::Relaxed) {
-                false => {
-                    // 0->1
-                    return true;
-                }
-                true => {
-                    // double tapped
-                    std::process::exit(libc::SIGTERM)
-                }
-            }
+            eprintln!("set triggered");
+            let _ = TRIGGERED.fetch_or(true, Ordering::Relaxed);
+            unmask_signals_in_current_thread();
+            return true;
         }
 
         // we're done, let someone else try
         *REAL_WAITER_MTX.lock().expect("Locking") = false;
+        eprintln!("notify");
         REAL_WAITER_CV.notify_all();
     }
 
