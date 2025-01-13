@@ -1,7 +1,14 @@
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
 const SIGSET_SIZE: usize = std::mem::size_of::<libc::sigset_t>();
+static REAL_WAITER_CV: std::sync::Condvar = std::sync::Condvar::new();
+static REAL_WAITER_MTX: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+// Only 1 waiter of sigtimedwait will receive the event, so we'll force a single
+// thread into the waiting below, everyone else will wait for THAT waiter
+static TRIGGERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn setup_graceful_shutdown() {
     // Create an empty block of memory that will become our sigset
@@ -15,7 +22,9 @@ pub fn setup_graceful_shutdown() {
     unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &mut sigset, std::ptr::null_mut()) };
 }
 
-pub fn trigger_shutdown() {}
+pub fn trigger_shutdown() {
+    let _ = TRIGGERED.fetch_or(true, Ordering::Relaxed);
+}
 
 pub fn shutdown_triggered() -> bool {
     return wait_for_shutdown_with_timeout(Duration::ZERO);
@@ -54,21 +63,10 @@ pub fn real_wait_for_signal(timeout: Duration) -> bool {
 }
 
 pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
-    use std::sync::Condvar;
-    use std::sync::Mutex;
-
     if TRIGGERED.load(Ordering::Relaxed) {
         unmask_signals_in_current_thread();
         return true;
     }
-
-    // Only 1 waiter of sigtimedwait will receive the event, so we'll force a single
-    // thread into the waiting below, everyone else will wait for THAT waiter
-    static REAL_WAITER_CV: Condvar = Condvar::new();
-    static REAL_WAITER_MTX: Mutex<bool> = Mutex::new(false);
-    static TRIGGERED: AtomicBool = AtomicBool::new(false);
 
     let now = Instant::now();
     let end_time = now + timeout;
@@ -129,4 +127,12 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
 
 pub fn wait_for_shutdown() {
     while !wait_for_shutdown_with_timeout(Duration::from_secs(1)) {}
+}
+
+#[cfg(feature = "tokio")]
+pub async fn async_wait_for_shutdown() {
+    while !TRIGGERED.load(Ordering::Relaxed) {
+        unmask_signals_in_current_thread();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
 }
