@@ -56,7 +56,6 @@ pub fn real_wait_for_signal(timeout: Duration) -> bool {
     let ret = unsafe { libc::sigtimedwait(&sigset, std::ptr::null_mut(), &wait_time) };
     if ret == -1 {
         // no signal
-        eprintln!("no signal");
         return false;
     }
     return true;
@@ -118,7 +117,6 @@ pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
 
         // we're done, let someone else try
         *REAL_WAITER_MTX.lock().expect("Locking") = false;
-        eprintln!("notify");
         REAL_WAITER_CV.notify_all();
     }
 
