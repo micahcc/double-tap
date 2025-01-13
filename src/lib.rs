@@ -3,8 +3,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 const SIGSET_SIZE: usize = std::mem::size_of::<libc::sigset_t>();
-static REAL_WAITER_CV: std::sync::Condvar = std::sync::Condvar::new();
-static REAL_WAITER_MTX: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
 
 // Only 1 waiter of sigtimedwait will receive the event, so we'll force a single
 // thread into the waiting below, everyone else will wait for THAT waiter
@@ -62,6 +60,9 @@ pub fn real_wait_for_signal(timeout: Duration) -> bool {
 }
 
 pub fn wait_for_shutdown_with_timeout(timeout: Duration) -> bool {
+    static REAL_WAITER_CV: std::sync::Condvar = std::sync::Condvar::new();
+    static REAL_WAITER_MTX: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
     if TRIGGERED.load(Ordering::Relaxed) {
         unmask_signals_in_current_thread();
         return true;
