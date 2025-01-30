@@ -25,7 +25,7 @@ pub fn trigger_shutdown() {
 }
 
 pub fn shutdown_triggered() -> bool {
-    return wait_for_shutdown_with_timeout(Duration::ZERO);
+    return TRIGGERED.load(Ordering::Relaxed);
 }
 
 fn unmask_signals_in_current_thread() {
