@@ -129,7 +129,7 @@ pub fn wait_for_shutdown() {
 }
 
 #[cfg(feature = "tokio")]
-pub async fn async_wait_for_shutdown() {
+pub async fn until_shutdown() {
     while !TRIGGERED.load(Ordering::Relaxed) {
         unmask_signals_in_current_thread();
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
